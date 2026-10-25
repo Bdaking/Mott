@@ -3,7 +3,8 @@
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmtDate = (d) => (d ? new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '-');
-    let token = localStorage.getItem('admin_token');
+  let token = null;
+  try { token = localStorage.getItem('admin_token'); } catch { /* storage blocked: sign-in still works for this tab */ }
   let timer = null;
   const app = $('#app');
 
@@ -12,16 +13,19 @@
     t.textContent = msg; t.className = 'show' + (isErr ? ' err' : '');
     clearTimeout(toast.t); toast.t = setTimeout(() => (t.className = ''), Math.min(15000, Math.max(3200, String(msg).length * 70)));
   }
-  function logout() { localStorage.removeItem('admin_token'); token = null; location.hash = ''; render(); }
+  function logout() { try { localStorage.removeItem('admin_token'); } catch {} token = null; location.hash = ''; render(); }
 
   async function api(path, { method = 'GET', body } = {}) {
-    const res = await fetch('/api/admin' + path, {
-      method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    let res;
+    try {
+      res = await fetch('/api/admin' + path, {
+        method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    } catch { throw new Error('Cannot reach the server. Check your internet connection and try again.'); }
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 && token) { logout(); throw new Error('Session expired. Please sign in again.'); }
-    if (!res.ok) throw new Error(data.error || 'Request failed');
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
   }
   const safe = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
@@ -36,17 +40,23 @@
   }
 
   function loginView() {
-    app.innerHTML = `<div class="login"><h1>Cinema Admin</h1><div class="card">
-      <div><label for="em">Email</label><input id="em" type="email" autocomplete="username"></div>
-      <div><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password"></div>
-      <button class="primary" id="go" style="width:100%">Sign in</button><div class="err" id="le"></div></div></div>`;
+    app.innerHTML = `<div class="login"><h1>Cinema Admin</h1><form class="card" id="lf" autocomplete="off" novalidate>
+      <div><label for="em">Email</label><input id="em" name="admin-email" type="email" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+      <div><label for="pw">Password</label><input id="pw" name="admin-password" type="password" autocomplete="new-password"></div>
+      <label class="row" style="color:var(--text);margin:0"><input type="checkbox" id="showpw" style="width:auto"> Show password</label>
+      <button class="primary" id="go" type="submit" style="width:100%">Sign in</button><div class="err" id="le" role="alert"></div></form></div>`;
     const go = async () => {
+      const email = $('#em').value.trim(), password = $('#pw').value;
+      if (!email || !password) { $('#le').textContent = 'Enter your email and password.'; return; }
+      $('#go').disabled = true; $('#le').textContent = '';
       try {
-        const r = await api('/auth/login', { method: 'POST', body: { email: $('#em').value, password: $('#pw').value } });
-        token = r.token; localStorage.setItem('admin_token', token); render();
-      } catch (e) { $('#le').textContent = e.message; }
+        const r = await api('/auth/login', { method: 'POST', body: { email, password } });
+        token = r.token; try { localStorage.setItem('admin_token', token); } catch {} render();
+      } catch (e) { $('#le').textContent = e.message; $('#go').disabled = false; }
     };
-    $('#go').onclick = go; $('#pw').onkeydown = (e) => e.key === 'Enter' && go();
+    $('#lf').onsubmit = (e) => { e.preventDefault(); go(); };
+    $('#showpw').onchange = (e) => { $('#pw').type = e.target.checked ? 'text' : 'password'; };
+    $('#em').focus();
   }
 
   const statusBadge = (m) => {
@@ -254,8 +264,8 @@
       ${check('Database (MongoDB)', d.database.ok, d.database.ok ? 'Connected' : 'Not connected')}
       ${check('Vimeo (movies)', d.vimeo.ok, d.vimeo.ok ? `${d.vimeo.account || ''} (${d.vimeo.plan || 'plan unknown'})` : (d.vimeo.error || (d.vimeo.configured ? 'Token rejected' : 'VIMEO_ACCESS_TOKEN missing')))}
       ${check('Cloudinary (images)', d.cloudinary.ok, d.cloudinary.ok ? 'Connected' : (d.cloudinary.error || 'Keys missing'))}
-      ${check('Login by email', d.login.devMode || d.login.email.ok, d.login.devMode ? 'Test mode: codes are shown in the app, no email is sent' : d.login.email.ok ? 'Gmail/SMTP login works' : (d.login.email.error || (d.login.email.configured ? 'SMTP login failed' : 'SMTP_* missing in .env')))}
-      ${check('Login by SMS', d.login.devMode || d.login.sms.configured, d.login.devMode ? 'Test mode' : d.login.sms.configured ? 'Twilio keys present (trial accounts only text verified numbers)' : 'TWILIO_* missing in .env')}
+      ${check('Login by email', d.login.devMode || d.login.email.ok, d.login.devMode ? 'Test mode: codes are shown in the app, no email is sent' : d.login.email.ok ? 'Email sending is configured' : (d.login.email.error || (d.login.email.configured ? 'Email login failed' : 'Add RESEND_API_KEY or SMTP_*')))}
+      ${check('Login by SMS', d.login.devMode || d.login.sms.configured, d.login.devMode ? 'Test mode' : d.login.sms.configured ? 'SMS provider keys present (Twilio trial only texts verified numbers)' : 'Add FAST2SMS_API_KEY or TWILIO_* (email login still works)')}
       ${check('Payments', d.payments.enabled, d.payments.enabled ? 'Dummy gateway: test cards only, no real money' : 'Switched off')}
       ${check('Video delivery', true, ({ files: 'Own player with plan-filtered MP4 files (strict, iOS + Android)', auto: 'Auto: iPhone/iPad use plan-filtered MP4 files, others use the Vimeo player', embed: 'Vimeo player, quality capped per plan (iOS may ignore the cap)' })[d.player.delivery] + (d.player.strict ? ' - strict' : ''))}</div>
       <p class="muted" style="margin-top:10px">Server address: ${esc(d.server.publicUrl)}</p>`;
